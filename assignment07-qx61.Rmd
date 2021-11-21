@@ -6,18 +6,27 @@ output: html_document
 ---
 
 ```{r setup, include = FALSE}
-knitr::opts_chunk$set(echo = TRUE)
 
-install.packages("janitor")
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+# install.packages("janitor")
+# install.packages("themis")
+# install.packages("GGally")
+  
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(ggplot2)
+library(recipes)
 ```
 
-## Exercise 01 (3 points)
+### Exercise 01 (3 points)
 
 Use the following code to create the data set for this application
 
 ```{r create the data set}
-library(tidyverse)
-library(lubridate)
 
 # use this url to download the data directly into R
 df <- read_csv("https://data.cityofnewyork.us/api/views/43nn-pn8j/rows.csv")
@@ -51,6 +60,7 @@ sampled_df <- sampled_df %>%
 sampled_df <- sampled_df %>%
   mutate(grade = if_else(grade == "A", "A", "Not A")) %>%
   mutate(grade = as.factor(grade))
+
 # create extra predictors
 sampled_df <- sampled_df %>%
   group_by(boro, zipcode, cuisine_description, inspection_date,
@@ -62,17 +72,197 @@ sampled_df <- sampled_df %>%
             vermin_types = sum(vermin),
             critical_flags = sum(critical_flag == "Y")) %>%
   ungroup()
+
 # write the data
 write_csv(sampled_df, "restaurant_grades.csv")
-summary(cars)
+```
+#### 1. Estimate a Model
+```{r estimate a model}
+
+set.seed(20201020)
+
+# create a split object
+sampled_df_split <- initial_split(data = sampled_df, prop = 0.75)
+
+# create the training and testing data
+sampled_train <- training(x = sampled_df_split)
+sampled_test <- testing(x = sampled_df_split)
+
+# create a recipe
+classfication_recipe <- 
+  recipe(formula = grade ~ ., data = sampled_train) %>% 
+  themis::step_downsample(grade)
+
+# estimate a decision tree
+cart_mod <- 
+  decision_tree() %>% 
+  set_engine(engine = "rpart") %>% 
+  set_mode(mode = "classification")
+
+# create a workflow
+classfication_workflow <- 
+  workflow() %>% 
+  add_model(spec = cart_mod) %>% 
+  add_recipe(recipe = classfication_recipe)
+
+# fit the model
+cart_fit <- classfication_workflow %>% 
+  fit(data = sampled_train)
+
+# Show a decision tree
+rpart.plot::rpart.plot(x = cart_fit$fit$fit$fit) #always a rpart class
+```
+#### 2. Evaluate the Model
+```{r evaluate the model}
+
+#evaluate the model
+predictions <- bind_cols(
+  sampled_test,
+  predict(object = cart_fit, new_data = sampled_test, type = "class"),
+  predict(object = cart_fit, new_data = sampled_test, type = "prob")
+)
+
+# create a confusion matrix
+conf_mat(data = predictions,
+                truth = grade,
+                estimate = .pred_class)
+
+# calculate the precision and sensitivity "by hand"
+precision <- 8026/(8026 + 17)
+precision
+
+sensitivity <- 8026/(8026 + 1950)
+sensitivity
+
+# calculate the precision and sensitivity using "tidymodels"
+precision_fun <- precision(data = predictions,
+                           truth = grade, 
+                           estimate = .pred_class)
+precision_fun
+
+sensitivity_fun <- sensitivity(data = predictions,
+                               truth = grade, 
+                               estimate = .pred_class)
+sensitivity_fun
+```
+**describe the quality of the model**
+The quality assessment of a model is context dependent. In this scenario, it is more important to correctly filter the non-A class. The underlying logic is unqualified restaurants then have motivation to increase their service and hygiene, thus increasing public health in the long run. Mis-classified restaurants can always request an second inspection to correct their ratings.
+
+#### 3. Improvement
+1. Adding additional predictors. This includes adding variables such as score, number of employees and census information of the neighborhood.
+2. Change algorithms. The current model uses classification model. We could use knn model alternatively as restaurants located in the same community may have similar attributes.
+3. Adding hyperparameters. Model quality can be improved by making predictions based on the k-nearest neighbor.
+
+
+#### 4. Variable Importance
+```{r variable importance}
+
+library(vip)
+
+cart_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 10)
+```
+This bar graph lists for variable importance. In other words, it counts the frequency of how often a variable is incorporated in the split. An overall evaluation of importance is the sum of goodness of split measures. While we should be aware that if there are any variables duplicates each other, such as violation code and violation description, which undermines importance evaluation for both variables.
+
+#### 5. Application
+The ombudsman could use this as a tool to prevent corruption in the restaurants rating. Since the model very accurately identifies the non-A results, restaurants are unlikely to bribe the inspector to get an A when they acutally not.
+
+
+# Exercise 02 (3 points)
+
+```{r exercise2 set-up}
+
+# download data
+Chicago <- read_csv("CTA_Ridership_Daily_Totals.csv")
+
+# convert string to date
+Chicago$date <- as.Date(mdy(Chicago$date))
+
+# wrangle data frame
+Chicago_estimation <- Chicago %>%
+  slice(1:5678)
+
+Chicago_implementation <- Chicago %>%
+  slice(5679:5698) 
+  #select(-ridership)
+```
+### 1. Convert date into a useable variable
+```{r convert table}
+
+Chicago_estimation <- Chicago_estimation %>% 
+          mutate(weekday = wday(date), label = TRUE,
+                 month = month(date), label = TRUE,
+                 yearday = yday(date), label = TRUE)
 ```
 
-## Including Plots
+### 2. Set up a testing environment
+```{r set up testing}
 
-You can also embed plots, for example:
+set.seed(20211101)
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+# create a split object
+Chicago_estimation_split <- initial_split(data = Chicago_estimation)
+
+# create the training and testing data
+Chicago_estimation_train <- training(x = Chicago_estimation_split)
+Chicago_estimation_test <- testing(x = Chicago_estimation_split)
+
+# EDA1
+Chicago_estimation_train %>% 
+  ggplot() +
+  geom_col(aes(x = weekday, y = rides/1000),
+           col = 0.6) +
+  labs(title = "Monthly Ridership Number",
+       x = "Month",
+       y = "Number of rides (per thousand") +
+  theme_minimal()
+
+# EDA2
+Chicago_estimation_train %>% 
+  ggplot() +
+   geom_point(aes(x = yearday, y = rides/100),
+           col = 0.6)
+
+# create 10-fold
+folds <- vfold_cv(data = Chicago_estimation_train, v = 10)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+### 3. Test different approaches
+```{r regressoion + hyperparameter}
+
+# create a recipe
+knn_recipe <- 
+  recipe(formula = rides ~ ., data = Chicago_estimation_train) %>% 
+  step_normalize(rides) %>% 
+  step_holiday(date) %>% 
+  themis::step_downsample(weekday)
+
+# create a model
+knn_mod <-
+  nearest_neighbor(neighbors = tune()) %>% 
+  set_engine(engine = "kknn") %>% 
+  set_mode(mode = "regression")
+
+# create a workflow
+knn_workflow  <- 
+  workflow(date) %>% 
+  add_model(spec = knn_mod) %>% 
+  add_recipe(recipe = knn_recipe)
+  add_formula(formula = rides ~ ., data = Chicago_estimation_train)
+
+# create a tunning grid
+knn_grid <- tibble(neighbors = seq(from = 1, to = 15, by = 5))
+
+# estimate with resampling
+knn_res <- 
+  knn_workflow %>% 
+  tune_grid(resample = folds,
+            grid = knn_grid,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(rmse))
+
+# select best model
+knn_res %>% 
+  select_best()
+```
