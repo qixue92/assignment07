@@ -13,16 +13,17 @@ knitr::opts_chunk$set(warning = FALSE)
 
 # install.packages("janitor")
 # install.packages("themis")
-# install.packages("GGally")
-  
+# install.packages("randomForest")
+
 library(tidyverse)
 library(lubridate)
 library(tidymodels)
 library(ggplot2)
 library(recipes)
+library(randomForest)
 ```
 
-### Exercise 01 (3 points)
+## Exercise 01 (3 points)
 
 Use the following code to create the data set for this application
 
@@ -145,7 +146,8 @@ sensitivity_fun <- sensitivity(data = predictions,
                                estimate = .pred_class)
 sensitivity_fun
 ```
-**describe the quality of the model**
+**describe the quality of the model**  
+
 The quality assessment of a model is context dependent. In this scenario, it is more important to correctly filter the non-A class. The underlying logic is unqualified restaurants then have motivation to increase their service and hygiene, thus increasing public health in the long run. Mis-classified restaurants can always request an second inspection to correct their ratings.
 
 #### 3. Improvement
@@ -163,31 +165,27 @@ cart_fit %>%
   pull_workflow_fit() %>%
   vip(num_features = 10)
 ```
+
 This bar graph lists for variable importance. In other words, it counts the frequency of how often a variable is incorporated in the split. An overall evaluation of importance is the sum of goodness of split measures. While we should be aware that if there are any variables duplicates each other, such as violation code and violation description, which undermines importance evaluation for both variables.
 
 #### 5. Application
-The ombudsman could use this as a tool to prevent corruption in the restaurants rating. Since the model very accurately identifies the non-A results, restaurants are unlikely to bribe the inspector to get an A when they acutally not.
+The ombudsman could use this as a tool to prevent corruption in the restaurants rating. Since the model very sensitive in identifying the non-A results, restaurants are unlikely to bribe the inspectors to get an A when they are actually not.
 
 
-# Exercise 02 (3 points)
+## Exercise 02 (3 points)
 
 ```{r exercise2 set-up}
-
-# download data
-Chicago <- read_csv("CTA_Ridership_Daily_Totals.csv")
-
-# convert string to date
-Chicago$date <- as.Date(mdy(Chicago$date))
 
 # wrangle data frame
 Chicago_estimation <- Chicago %>%
   slice(1:5678)
 
 Chicago_implementation <- Chicago %>%
-  slice(5679:5698) 
-  #select(-ridership)
+  slice(5679:5698) %>% 
+  select(-ridership)
 ```
-### 1. Convert date into a useable variable
+
+#### 1. Convert date into a useable variable
 ```{r convert table}
 
 Chicago_estimation <- Chicago_estimation %>% 
@@ -196,7 +194,7 @@ Chicago_estimation <- Chicago_estimation %>%
                  yearday = yday(date), label = TRUE)
 ```
 
-### 2. Set up a testing environment
+#### 2. Set up a testing environment
 ```{r set up testing}
 
 set.seed(20211101)
@@ -211,32 +209,33 @@ Chicago_estimation_test <- testing(x = Chicago_estimation_split)
 # EDA1
 Chicago_estimation_train %>% 
   ggplot() +
-  geom_col(aes(x = weekday, y = rides/1000),
-           col = 0.6) +
-  labs(title = "Monthly Ridership Number",
-       x = "Month",
-       y = "Number of rides (per thousand") +
+  geom_col(aes(x = yearday, y = ridership),
+           color = "#009FDA") +
+  labs(title = "Annual Ridership",
+       x = "Day number of the year",
+       y = "Number of rides") +
   theme_minimal()
-
-# EDA2
-Chicago_estimation_train %>% 
-  ggplot() +
-   geom_point(aes(x = yearday, y = rides/100),
-           col = 0.6)
 
 # create 10-fold
 folds <- vfold_cv(data = Chicago_estimation_train, v = 10)
 ```
 
-### 3. Test different approaches
-```{r regressoion + hyperparameter}
+#### 3. Test different approaches
+
+##### 3.1 knn + hyperparameter
+```{r 3.1 tuning hyperparameter}
 
 # create a recipe
 knn_recipe <- 
-  recipe(formula = rides ~ ., data = Chicago_estimation_train) %>% 
-  step_normalize(rides) %>% 
+  recipe(formula = ridership ~ ., data = Chicago_estimation_train) %>% 
+  step_normalize(ridership) %>% 
   step_holiday(date) %>% 
-  themis::step_downsample(weekday)
+  step_dummy(all_nominal_predictors())
+  
+# see the outcome data
+bake(prep(knn_recipe, training = Chicago_estimation_train), new_data = Chicago_estimation_test)
+
+##### run the model - regression ######
 
 # create a model
 knn_mod <-
@@ -246,12 +245,11 @@ knn_mod <-
 
 # create a workflow
 knn_workflow  <- 
-  workflow(date) %>% 
+  workflow() %>% 
   add_model(spec = knn_mod) %>% 
   add_recipe(recipe = knn_recipe)
-  add_formula(formula = rides ~ ., data = Chicago_estimation_train)
 
-# create a tunning grid
+# create a tuning grid
 knn_grid <- tibble(neighbors = seq(from = 1, to = 15, by = 5))
 
 # estimate with resampling
@@ -262,7 +260,406 @@ knn_res <-
             control = control_grid(save_pred = TRUE),
             metrics = metric_set(rmse))
 
-# select best model
-knn_res %>% 
-  select_best()
+# select best model (k = 11)
+knn_best <- knn_res %>% 
+            select_best()
+
+### create a new model ###
+knn_mod_11 <-
+  nearest_neighbor(neighbors = 11) %>% 
+  set_engine(engine = "kknn") %>% 
+  set_mode(mode = "regression")
+
+# create a new workflow
+knn_workflow_11  <- 
+  workflow() %>% 
+  add_model(spec = knn_mod_11) %>% 
+  add_recipe(recipe = knn_recipe)
+
+# fit resample
+knn_fit_rs <-
+  knn_workflow_11 %>% 
+  fit_resamples(resample = folds)
+
+# collect metrics
+collect_metrics(knn_fit_rs)
+
+# plot rmse
+collect_metrics(knn_fit_rs, summarize = FALSE) %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(id, .estimate, group = .estimator)) +
+  geom_line() +
+  geom_point() +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Calculated RMSE Across the 10 Folds",
+       y = "RMSE_hat") +
+  theme_minimal()
 ```
+
+```{r customized function/loop, include = FALSE, eval = FALSE}
+
+# customized function to return re-sample rmse
+calculate_metrics <- function(x) {
+  # extract data 
+  analysis_x <-folds$splits[[x]] %>% 
+                   analysis()
+  # predict 
+  predict_x <- bind_cols(
+  analysis_x,
+  predict(object = knn_fit, new_data = analysis_x)
+) 
+  #calculate ame
+  mae_x <- mae(data = predict_x, truth = ridership, estimate = .pred)
+  #calculate rmse
+  rmse_x <- rmse(data = predict_x, truth = ridership, estimate = .pred)
+}
+
+# create loop to plot each resample
+for(i in 1:10) {
+  # extract data 
+  analysis_i <-folds$splits[[i]] %>% 
+                   analysis()
+  # predict 
+  predict_i <- bind_cols(
+  analysis_i,
+  predict(object = knn_fit, new_data = analysis_i)
+) 
+  #calculate ame
+  mae_i <- mae(data = predict_i, truth = ridership, estimate = .pred)
+  #calculate rmse
+  rmse_i <- rmse(data = predict_i, truth = ridership, estimate = .pred)
+  # return
+  plot(rmse_i)
+}
+```
+
+##### 3.2 Decision Tree
+```{r 3.2 decision tree}
+
+# remove non-numeric columns
+Chicago_estimation_train <- Chicago_estimation_train %>% 
+                                 select(-date, -label)
+# create a recipe
+cart_recipe <- 
+  recipe(formula = ridership ~ ., data = Chicago_estimation_train) %>% 
+  # dummy encode categorical predictors
+  step_dummy(all_nominal_predictors()) %>%
+  # center and scale predictors
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  # drop near zero variance predictors
+  step_nzv(all_predictors())
+
+# create a cart model object
+cart_mod <- 
+  decision_tree() %>% 
+  set_engine(engine = "rpart") %>% 
+  set_mode(mode = "regression")
+
+# create a workflow
+cart_workflow  <- 
+  workflow() %>% 
+  add_model(spec = cart_mod) %>% 
+  add_recipe(recipe = cart_recipe)
+
+# estimate with resampling
+cart_res <- 
+  cart_workflow %>% 
+  tune_grid(resample = folds,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(rmse))
+
+# fit resample
+cart_fit_rs <-
+  cart_workflow %>% 
+  fit_resamples(resample = folds)
+
+# collect metrics
+collect_metrics(cart_fit_rs)
+
+# plot rmse
+collect_metrics(cart_fit_rs, summarize = FALSE) %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(id, .estimate, group = .estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Calculated RMSE Across the 10 Folds",
+       y = "RMSE_hat") +
+  theme_minimal()
+```
+
+##### 3.3 Random Forest
+```{r 3.3 random forest}
+
+# create a recipe
+rf_recipe <- 
+  recipe(formula = ridership ~ ., data = Chicago_estimation_train) %>% 
+  # dummy encode categorical predictors
+  step_dummy(all_nominal_predictors()) %>%
+  # center and scale predictors
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors()) %>%
+  # drop near zero variance predictors
+  step_nzv(all_predictors())
+
+# create a cart model object
+rf_mod <- 
+  rand_forest() %>% 
+  set_engine(engine = "randomForest") %>% 
+  set_mode(mode = "regression")
+
+# create a workflow
+rf_workflow  <- 
+  workflow() %>% 
+  add_model(spec = rf_mod) %>% 
+  add_recipe(recipe = rf_recipe)
+
+# estimate with resampling
+rf_res <- 
+ rf_workflow %>% 
+  tune_grid(resample = folds,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(rmse))
+
+# fit resample
+rf_fit_rs <-
+  rf_workflow %>% 
+  fit_resamples(resample = folds)
+
+# collect metrics
+collect_metrics(rf_fit_rs)
+
+# plot rmse
+collect_metrics(rf_fit_rs, summarize = FALSE) %>% 
+  filter(.metric == "rmse") %>% 
+  ggplot(aes(id, .estimate, group = .estimator)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Calculated RMSE Across the 10 Folds",
+       y = "RMSE_hat") +
+  theme_minimal()
+```
+
+#### 4. Estimate the out-of-sample error rate
+```{r 4.out-of-sample error rate}
+
+# prediction
+knn_mod_best <-
+  nearest_neighbor(neighbors = 11) %>% 
+  set_engine(engine = "kknn") %>% 
+  set_mode(mode = "regression")
+
+# fit the model
+knn_fit_best <- knn_mod_best %>% 
+  fit(formula = ridership ~ ., data = Chicago_estimation_train)
+
+# make predictions using traning data
+predictions_best <- bind_cols(
+  Chicago_estimation_test,
+  predict(object = knn_fit_best, new_data = Chicago_estimation_test),
+)
+
+# calculate rmse
+rmse(data = predictions_best, truth = ridership, estimate = .pred)
+```
+
+#### 5. Implement the final model
+```{r implement final model, eval = FALSE}
+
+print(Chicago_implementation)
+
+library(vip)
+
+Chicago_implementation %>%
+  vip(num_features = 10)
+
+predictions_implement <- bind_cols(
+  Chicago_implementation,
+  predict(object = knn_fit_best, new_data = Chicago_implementation),
+)
+```
+
+#### 6. Briefly describe your final model
+The model generates pretty accurate estimation. It is locally interpretable but its generalization is relatively undermined. The most important predictors are weather, data/time and location. 
+
+
+## Exercise 03 (6 points)
+
+#### 1. Set up
+
+**a. Briefly describe the data set**
+
+The target variable is the duration of a bike ride. Two types of clustered estimators are included in the data set. We include geospacial and time-relevant variables to predict the duration of a ride to assess usage pattern to better targer potential customers. 
+
+```{r exercise03 set up}
+
+# load dataset
+bike <- read_csv("202108-capitalbikeshare-tripdata.csv", 
+                  show_col_types = FALSE) %>% 
+        mutate(duration = (ended_at - started_at)/60, 
+               day = day(ymd_hms(started_at)),
+               hour = hour(ymd_hms(started_at)),
+               month = month(ymd_hms(started_at), label = TRUE),
+               year = year(ymd_hms(started_at)),
+               weekday = wday(ymd_hms(started_at), label = TRUE),
+               yearday = yday(ymd_hms(started_at))) %>% 
+        select(-ride_id, -started_at, -ended_at, 
+               -start_station_name, -end_station_name)
+```
+
+```{r data wrangle, include = FALSE, eval = FALSE}
+
+# Shape wider
+bike_df <- bike %>% 
+  pivot_longer(c("started_at", "ended_at"), names_to = "time_type", values_to = "time") %>% 
+  mutate(station = ifelse(time_type == "started_at", start_station_name, end_station_name)) %>% 
+  select(-start_station_name, -end_station_name)
+
+# generate time intervals
+bike_df  <- bike_df  %>% 
+    mutate(day = day(ymd_hms(time)),
+           hour = hour(ymd_hms(time)),
+           month = month(ymd_hms(time), label = TRUE),
+           year = year(ymd_hms(time)),
+           weekday = wday(ymd_hms(time), label = TRUE),
+           yearday = yday(ymd_hms(time)))
+           
+## generate ridership
+hour_bike_df <- bike_df %>% 
+  group_by(year, month, day, hour, station, time_type) %>% 
+  summarize(count = n()) %>% 
+  pivot_wider(names_from = "station", values_from = "count") %>% 
+  mutate(type = ifelse(time_type == "started_at", "departures", "arrivals")) %>% 
+  select(-time_type) %>%
+  mutate_all(~ifelse(is.na(.), 0, .)) %>% 
+  rename_with(~ tolower(str_replace_all(., pattern = " ", replacement = "_")))
+```
+
+```{r data split}
+
+set.seed(20211121)
+
+# create a split object
+bike_split <- initial_split(data = bike)
+
+# create the training and testing data
+bike_train <- training(x = bike_split)
+bike_test <- testing(x = bike_split)
+
+# create 3-fold
+folds <- vfold_cv(data = bike_train, v = 3)
+```
+
+**b. Use data visualization to perform an exploratory data analysis**
+```{r data EDA}
+
+# EDA1
+bike_train %>% 
+  group_by(start_station_id) %>% 
+  summarize(count = n()) %>% 
+  filter(count < 10000) %>% 
+  ggplot() +
+  geom_col(aes(x = start_station_id, y = count))
+# each station has dramatic different departure numbers
+
+# EDA2
+bike_train %>% 
+  group_by(rideable_type, member_casual) %>% 
+  ggplot() +
+  geom_col(aes(x = member_casual, y = as.factor(duration))) +
+  theme_minimal()
+```
+
+#### 2. Come up with Models
+
+**a. Processing data**
+```{r processing data}
+
+# select numeric variables of interest
+bike_train <- bike_train %>%
+  mutate(duration = as.numeric(duration),
+         weekday = as.numeric(weekday)) %>% 
+  select(-rideable_type, -member_casual, -month)
+ 
+# standardize the variables
+bike_train_numeric <- bike_train %>%
+  mutate_all(.funs = ~ scales::rescale(.x))
+
+# correlation
+cor_bike_train <- cor(bike_train_numeric)
+print(cor_bike_train)
+
+# co-variate
+cov_bike_train <- cov(bike_train_numeric)
+print(cov_bike_train)
+```
+In this exercise, I will pick rmse to decide which model is the best. The data is process at the beginning and in this recipe below.
+
+**b. Briefly outline what your predictors**
+
+Redundant predictors are removed when importing the data. For example, station is recorded in both name and id, only id was chosen to analyze in this exercise. 
+
+The geospatial data is highly relevant to its surrounding neighborhood. It serves as a good predictor to the duration of a ride. Time relevant variables, such as weekday and hour are great to predict peak hours and bike usage.
+
+**c. Describe three clustering model specifications**
+
+There are different clustering model specification. The widely applied ones are hierarchical models, 
+
+1. algorithm: K-means
+```{r predict a model using kmeans, eval = FALSE}
+
+# install.packages("Boom")
+library(Boom)
+
+set.seed(20211121)
+
+# predict two clusters
+bike_train_kmeans <- kmeans(bike_train_numeric,
+                     centers = 3,
+                     nstart = 10)
+
+# show result table
+tidy(bike_train_kmeans) %>%
+  knitr::kable(digits = 2)
+```
+2. algorithm: PCA
+```{r predict a model using pca, eval = FALSE}
+
+# run PCA
+bike_pca <- 
+  prcomp(bike_train_numeric)
+
+# extract the principle components
+bikes_pcs <- bike_pca %>%
+             .$x  %>%
+             as_tibble()
+
+# combine the pcs to the to previous dataset
+bike_pcs <- bind_cols(
+  select(duration, start_station_id, start_lat, start_lng),
+  votes_pcs
+)
+```
+
+### 4. Interpretation
+
+**a. Interpret the results**
+
+The result is very useful in application. From the EDA, we learned that each station has a very distinct departure statistics. The popularity of a one station is mainly depend on two factors. One is location. The other is the time of the day/week. Our clustered model well captures these two aspects, thus making a good application of clustering analysis.
+
+**b. Specification quality**
+
+The second specification can be worse compared to the first specification. PCA is more useful when there are way more variables, but not so useful in this relatively narrow dataset. K-means best captures the location thus more accurately predicts its popularity. 
+
+**c. Specification quality** 
+
+The third specification ...
+
+**d. Suggest a specification**
+
+We can add more add auxiliary information from other data sets. This includes proximity to a metro station, the weather of the day/hour, and temperature etc.
+
+**e. Model usefulness**
+
+The models used here are not very useful. The predictions could have been better with supervised machine learning, as our goal is to predict known values and we could further confirms our model accuracy.
+
